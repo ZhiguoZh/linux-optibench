@@ -386,6 +386,16 @@ void free_pgtables(struct mmu_gather *tlb, struct maple_tree *mt,
 		unlink_anon_vmas(vma);
 		unlink_file_vma_batch(vma, &locked_mapping);
 
+		/*
+		 * Release i_mmap_rwsem before the expensive page table
+		 * teardown below.  The VMA has already been removed from
+		 * the interval tree by unlink_file_vma_batch(), so no
+		 * reverse-mapping or truncate lookup can find it.
+		 * Dropping the lock here dramatically reduces contention
+		 * when many processes exec the same binary concurrently.
+		 */
+		unlink_file_vma_batch_final(&locked_mapping);
+
 		if (is_vm_hugetlb_page(vma)) {
 			hugetlb_free_pgd_range(tlb, addr, vma->vm_end,
 				floor, next ? next->vm_start : ceiling);
@@ -402,6 +412,7 @@ void free_pgtables(struct mmu_gather *tlb, struct maple_tree *mt,
 				unlink_anon_vmas(vma);
 				unlink_file_vma_batch(vma, &locked_mapping);
 			}
+			unlink_file_vma_batch_final(&locked_mapping);
 			free_pgd_range(tlb, addr, vma->vm_end,
 				floor, next ? next->vm_start : ceiling);
 		}
