@@ -132,6 +132,46 @@ void unlink_file_vma(struct vm_area_struct *vma)
 }
 
 /*
+ * Batched version of unlink_file_vma for use in free_pgtables.
+ * Keeps i_mmap_rwsem held across consecutive VMAs that share the same
+ * address_space, reducing lock contention when many processes exec the
+ * same binary concurrently.
+ */
+void unlink_file_vma_batch(struct vm_area_struct *vma,
+			   struct address_space **locked_mapping)
+{
+	struct file *file = vma->vm_file;
+	struct address_space *mapping;
+
+	if (!file) {
+		if (*locked_mapping) {
+			i_mmap_unlock_write(*locked_mapping);
+			*locked_mapping = NULL;
+		}
+		return;
+	}
+
+	mapping = file->f_mapping;
+
+	if (*locked_mapping != mapping) {
+		if (*locked_mapping)
+			i_mmap_unlock_write(*locked_mapping);
+		i_mmap_lock_write(mapping);
+		*locked_mapping = mapping;
+	}
+
+	__remove_shared_vm_struct(vma, file, mapping);
+}
+
+void unlink_file_vma_batch_final(struct address_space **locked_mapping)
+{
+	if (*locked_mapping) {
+		i_mmap_unlock_write(*locked_mapping);
+		*locked_mapping = NULL;
+	}
+}
+
+/*
  * Close a vm structure and free it.
  */
 static void remove_vma(struct vm_area_struct *vma, bool unreachable)

@@ -365,6 +365,7 @@ void free_pgtables(struct mmu_gather *tlb, struct maple_tree *mt,
 		   unsigned long ceiling, bool mm_wr_locked)
 {
 	MA_STATE(mas, mt, vma->vm_end, vma->vm_end);
+	struct address_space *locked_mapping = NULL;
 
 	do {
 		unsigned long addr = vma->vm_start;
@@ -383,7 +384,7 @@ void free_pgtables(struct mmu_gather *tlb, struct maple_tree *mt,
 		if (mm_wr_locked)
 			vma_start_write(vma);
 		unlink_anon_vmas(vma);
-		unlink_file_vma(vma);
+		unlink_file_vma_batch(vma, &locked_mapping);
 
 		if (is_vm_hugetlb_page(vma)) {
 			hugetlb_free_pgd_range(tlb, addr, vma->vm_end,
@@ -399,13 +400,15 @@ void free_pgtables(struct mmu_gather *tlb, struct maple_tree *mt,
 				if (mm_wr_locked)
 					vma_start_write(vma);
 				unlink_anon_vmas(vma);
-				unlink_file_vma(vma);
+				unlink_file_vma_batch(vma, &locked_mapping);
 			}
 			free_pgd_range(tlb, addr, vma->vm_end,
 				floor, next ? next->vm_start : ceiling);
 		}
 		vma = next;
 	} while (vma);
+
+	unlink_file_vma_batch_final(&locked_mapping);
 }
 
 void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte)

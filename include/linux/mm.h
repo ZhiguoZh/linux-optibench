@@ -3101,6 +3101,9 @@ extern int split_vma(struct vma_iterator *vmi, struct vm_area_struct *,
 			 unsigned long addr, int new_below);
 extern int insert_vm_struct(struct mm_struct *, struct vm_area_struct *);
 extern void unlink_file_vma(struct vm_area_struct *);
+extern void unlink_file_vma_batch(struct vm_area_struct *vma,
+				  struct address_space **locked_mapping);
+extern void unlink_file_vma_batch_final(struct address_space **locked_mapping);
 extern struct vm_area_struct *copy_vma(struct vm_area_struct **,
 	unsigned long addr, unsigned long len, pgoff_t pgoff,
 	bool *need_rmap_locks);
