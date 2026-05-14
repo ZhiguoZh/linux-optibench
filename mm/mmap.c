@@ -125,8 +125,13 @@ void unlink_file_vma(struct vm_area_struct *vma)
 
 	if (file) {
 		struct address_space *mapping = file->f_mapping;
+
+		if (RB_EMPTY_NODE(&vma->shared.rb))
+			return;
+
 		i_mmap_lock_write(mapping);
 		__remove_shared_vm_struct(vma, file, mapping);
+		RB_CLEAR_NODE(&vma->shared.rb);
 		i_mmap_unlock_write(mapping);
 	}
 }
@@ -3210,6 +3215,36 @@ void exit_mmap(struct mm_struct *mm)
 	set_bit(MMF_OOM_SKIP, &mm->flags);
 	mmap_write_lock(mm);
 	mt_clear_in_rcu(&mm->mm_mt);
+
+	/* Batch-unlink all file-backed VMAs from their interval trees.
+	 * Group consecutive VMAs sharing the same mapping to reduce
+	 * i_mmap_rwsem acquisition count and contention. */
+	{
+		struct vm_area_struct *v;
+		struct address_space *cur_mapping = NULL;
+		MA_STATE(mas2, &mm->mm_mt, 0, 0);
+		mas_for_each(&mas2, v, ULONG_MAX) {
+			if (v->vm_file) {
+				struct address_space *mapping = v->vm_file->f_mapping;
+				if (mapping != cur_mapping) {
+					if (cur_mapping)
+						i_mmap_unlock_write(cur_mapping);
+					cur_mapping = mapping;
+					i_mmap_lock_write(cur_mapping);
+				}
+				__remove_shared_vm_struct(v, v->vm_file, mapping);
+				RB_CLEAR_NODE(&v->shared.rb);
+			} else {
+				if (cur_mapping) {
+					i_mmap_unlock_write(cur_mapping);
+					cur_mapping = NULL;
+				}
+			}
+		}
+		if (cur_mapping)
+			i_mmap_unlock_write(cur_mapping);
+	}
+
 	free_pgtables(&tlb, &mm->mm_mt, vma, FIRST_USER_ADDRESS,
 		      USER_PGTABLES_CEILING, true);
 	tlb_finish_mmu(&tlb);
