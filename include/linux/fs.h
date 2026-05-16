@@ -448,6 +448,7 @@ struct address_space {
 #endif
 	struct rb_root_cached	i_mmap;
 	struct rw_semaphore	i_mmap_rwsem;
+	struct llist_head	i_mmap_pending;
 	unsigned long		nrpages;
 	pgoff_t			writeback_index;
 	const struct address_space_operations *a_ops;
@@ -476,14 +477,26 @@ static inline bool mapping_tagged(struct address_space *mapping, xa_mark_t tag)
 	return xa_marked(&mapping->i_pages, tag);
 }
 
+/*
+ * Drain deferred VMA insertions from the pending llist into the interval tree.
+ * Must be called with i_mmap_rwsem held for write.
+ * Implemented in mm/mmap.c.
+ */
+void __i_mmap_drain_pending(struct address_space *mapping);
+
 static inline void i_mmap_lock_write(struct address_space *mapping)
 {
 	down_write(&mapping->i_mmap_rwsem);
+	if (unlikely(!llist_empty(&mapping->i_mmap_pending)))
+		__i_mmap_drain_pending(mapping);
 }
 
 static inline int i_mmap_trylock_write(struct address_space *mapping)
 {
-	return down_write_trylock(&mapping->i_mmap_rwsem);
+	int ret = down_write_trylock(&mapping->i_mmap_rwsem);
+	if (ret && unlikely(!llist_empty(&mapping->i_mmap_pending)))
+		__i_mmap_drain_pending(mapping);
+	return ret;
 }
 
 static inline void i_mmap_unlock_write(struct address_space *mapping)
@@ -493,12 +506,20 @@ static inline void i_mmap_unlock_write(struct address_space *mapping)
 
 static inline int i_mmap_trylock_read(struct address_space *mapping)
 {
+	if (unlikely(!llist_empty(&mapping->i_mmap_pending)))
+		return 0; /* Force caller to use i_mmap_lock_read for drain */
 	return down_read_trylock(&mapping->i_mmap_rwsem);
 }
 
 static inline void i_mmap_lock_read(struct address_space *mapping)
 {
-	down_read(&mapping->i_mmap_rwsem);
+	if (unlikely(!llist_empty(&mapping->i_mmap_pending))) {
+		down_write(&mapping->i_mmap_rwsem);
+		__i_mmap_drain_pending(mapping);
+		downgrade_write(&mapping->i_mmap_rwsem);
+	} else {
+		down_read(&mapping->i_mmap_rwsem);
+	}
 }
 
 static inline void i_mmap_unlock_read(struct address_space *mapping)

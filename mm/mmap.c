@@ -393,6 +393,29 @@ static unsigned long count_vma_pages_range(struct mm_struct *mm,
 	return nr_pages;
 }
 
+/*
+ * Drain deferred VMA insertions from the pending llist into the interval tree.
+ * Called with i_mmap_rwsem held for write.
+ */
+void __i_mmap_drain_pending(struct address_space *mapping)
+{
+	struct llist_node *pending, *pos;
+	struct vm_area_struct *vma;
+
+	pending = llist_del_all(&mapping->i_mmap_pending);
+	if (!pending)
+		return;
+
+	llist_for_each(pos, pending) {
+		vma = container_of(pos, struct vm_area_struct, i_mmap_pend);
+		if (vma->vm_flags & VM_SHARED)
+			mapping_allow_writable(mapping);
+		flush_dcache_mmap_lock(mapping);
+		vma_interval_tree_insert(vma, &mapping->i_mmap);
+		flush_dcache_mmap_unlock(mapping);
+	}
+}
+
 static void __vma_link_file(struct vm_area_struct *vma,
 			    struct address_space *mapping)
 {
@@ -412,16 +435,24 @@ static int vma_link(struct mm_struct *mm, struct vm_area_struct *vma)
 	if (vma_iter_prealloc(&vmi))
 		return -ENOMEM;
 
-	if (vma->vm_file) {
-		mapping = vma->vm_file->f_mapping;
-		i_mmap_lock_write(mapping);
-	}
-
 	vma_iter_store(&vmi, vma);
 
-	if (mapping) {
-		__vma_link_file(vma, mapping);
-		i_mmap_unlock_write(mapping);
+	if (vma->vm_file) {
+		mapping = vma->vm_file->f_mapping;
+		/*
+		 * Try to insert into the interval tree immediately.
+		 * Under heavy contention (e.g., many processes exec-ing
+		 * the same binary), defer to a pending list that will be
+		 * drained the next time the lock is acquired.
+		 */
+		if (i_mmap_trylock_write(mapping)) {
+			__vma_link_file(vma, mapping);
+			i_mmap_unlock_write(mapping);
+		} else {
+			if (vma->vm_flags & VM_SHARED)
+				mapping_allow_writable(mapping);
+			llist_add(&vma->i_mmap_pend, &mapping->i_mmap_pending);
+		}
 	}
 
 	mm->map_count++;
@@ -2812,19 +2843,23 @@ cannot_expand:
 
 	/* Lock the VMA since it is modified after insertion into VMA tree */
 	vma_start_write(vma);
-	if (vma->vm_file)
-		i_mmap_lock_write(vma->vm_file->f_mapping);
-
 	vma_iter_store(&vmi, vma);
 	mm->map_count++;
 	if (vma->vm_file) {
-		if (vma->vm_flags & VM_SHARED)
-			mapping_allow_writable(vma->vm_file->f_mapping);
-
-		flush_dcache_mmap_lock(vma->vm_file->f_mapping);
-		vma_interval_tree_insert(vma, &vma->vm_file->f_mapping->i_mmap);
-		flush_dcache_mmap_unlock(vma->vm_file->f_mapping);
-		i_mmap_unlock_write(vma->vm_file->f_mapping);
+		struct address_space *f_mapping = vma->vm_file->f_mapping;
+		/*
+		 * Try to insert into the file interval tree immediately.
+		 * Under heavy exec contention, defer to a pending list to
+		 * avoid serializing on i_mmap_rwsem.
+		 */
+		if (i_mmap_trylock_write(f_mapping)) {
+			__vma_link_file(vma, f_mapping);
+			i_mmap_unlock_write(f_mapping);
+		} else {
+			if (vma->vm_flags & VM_SHARED)
+				mapping_allow_writable(f_mapping);
+			llist_add(&vma->i_mmap_pend, &f_mapping->i_mmap_pending);
+		}
 	}
 
 	/*

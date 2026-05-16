@@ -7,6 +7,7 @@
 #include <linux/auxvec.h>
 #include <linux/kref.h>
 #include <linux/list.h>
+#include <linux/llist.h>
 #include <linux/spinlock.h>
 #include <linux/rbtree.h>
 #include <linux/maple_tree.h>
@@ -548,6 +549,9 @@ struct vm_area_struct {
 		struct rb_node rb;
 		unsigned long rb_subtree_last;
 	} shared;
+
+	/* For deferred i_mmap interval tree insertion (reduces i_mmap_rwsem contention) */
+	struct llist_node i_mmap_pend;
 
 	/*
 	 * A file's MAP_PRIVATE vma can be in both i_mmap tree and anon_vma
